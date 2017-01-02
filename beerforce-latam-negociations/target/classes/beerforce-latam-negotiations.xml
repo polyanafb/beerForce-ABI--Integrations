@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:dw="http://www.mulesoft.org/schema/mule/ee/dw" xmlns:batch="http://www.mulesoft.org/schema/mule/batch" xmlns:sfdc="http://www.mulesoft.org/schema/mule/sfdc" xmlns:tracking="http://www.mulesoft.org/schema/mule/ee/tracking" xmlns:db="http://www.mulesoft.org/schema/mule/db" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:spring="http://www.springframework.org/schema/beans" 
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-current.xsd
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+http://www.mulesoft.org/schema/mule/ee/tracking http://www.mulesoft.org/schema/mule/ee/tracking/current/mule-tracking-ee.xsd
+http://www.mulesoft.org/schema/mule/batch http://www.mulesoft.org/schema/mule/batch/current/mule-batch.xsd
+http://www.mulesoft.org/schema/mule/ee/dw http://www.mulesoft.org/schema/mule/ee/dw/current/dw.xsd
+http://www.mulesoft.org/schema/mule/sfdc http://www.mulesoft.org/schema/mule/sfdc/current/mule-sfdc.xsd">
+    <db:oracle-config name="Oracle_Configuration_arg" host="${oracle.host.ar}" port="${oracle.port.ar}" instance="${oracle.inst.ar}" user="${oracle.user.ar}" password="${oracle.pass.ar}" doc:name="Oracle Configuration"/>
+    <sfdc:config name="Salesforce__Basic_Authentication" username="${sales.user.latam.u}" password="${sales.pass.latam.u}" securityToken="${sales.token.latam.u}" url="${sales.url.latam.u}" doc:name="Salesforce: Basic Authentication"/>
+    <flow name="beerforce-latam-negociationsFlow" initialState="stopped">
+        <poll doc:name="Poll">
+            <fixed-frequency-scheduler frequency="1" timeUnit="DAYS"/>
+            <logger message="START NEGOTIATION HEADER INSERT" level="INFO" doc:name="START"/>
+        </poll>
+        <db:stored-procedure config-ref="Oracle_Configuration_arg" doc:name="Database">
+            <db:parameterized-query><![CDATA[call SFI.SFI_GET_PROCESSID_SP(:PROCESS_ID)]]></db:parameterized-query>
+            <db:out-param name="PROCESS_ID" type="NUMERIC"/>
+        </db:stored-procedure>
+        <set-variable variableName="processid" value="#[payload.PROCESS_ID]" doc:name="Variable"/>
+        <logger message="PROCCESS ID ====================  #[flowVars.proccessid]" level="INFO" doc:name="Logger"/>
+        <db:select config-ref="Oracle_Configuration_arg" doc:name="Database">
+            <db:parameterized-query><![CDATA[SELECT
+RECORD_ID,
+ONTAP__ACCOUNT__C,
+ONTAP__APPROVER_S__C,
+ONTAP__CLASSIFICATION__C,
+ONTAP__COMMENTS__C,
+ONTAP__END_DATE__C,
+ONTAP__EXTERNAL_NEGOTIATION_ID,
+ONTAP__NEGOTIATION_DATE__C,
+ONTAP__START_DATE__C,
+ONTAP__STATUS__C
+FROM SFI_NEGOTIATION_INSERT_VIEW]]></db:parameterized-query>
+        </db:select>
+        <batch:execute name="beerforce-latam-negociationsBatch" doc:name="beerforce-latam-negociationsBatch"/>
+    </flow>
+    <batch:job name="beerforce-latam-negociationsBatch" block-size="1000">
+        <batch:process-records>
+            <batch:step name="Batch_Step">
+                <batch:commit size="200" doc:name="Batch Commit">
+                    <set-variable variableName="savepayload" value="#[payload]" encoding="UTF-8" doc:name="Variable"/>
+                    <logger message="PAYLOAD VARIABLE ================  #[flowVars.savepayload]" level="INFO" doc:name="Logger"/>
+                    <dw:transform-message doc:name="Transform Message">
+                        <dw:set-payload><![CDATA[%dw 1.0
+%output application/java
+---
+payload map ((payload , indexOfPayload01) ->  {
+	
+	ONTAP__Account__c: payload.ONTAP__ACCOUNT__C,
+	ONTAP__Approver_s__c: payload.ONTAP__APPROVER_S__C,
+	ONTAP__Classification__c: payload.ONTAP__CLASSIFICATION__C,
+	ONTAP__Comments__c: payload.ONTAP__COMMENTS__C,
+	ONTAP__End_Date__c: (payload.ONTAP__END_DATE__C as :date {format: "dd/MM/yyyy"}),
+	ONTAP__External_Negotiation_Id__c: payload.ONTAP__EXTERNAL_NEGOTIATION_ID,
+	ONTAP__Negotiation_Date__c: payload.ONTAP__NEGOTIATION_DATE__C as :date {format: "dd/MM/yyyy"},
+	ONTAP__Start_Date__c: (payload.ONTAP__START_DATE__C as :date {format: "dd/MM/yyyy"}),
+	ONTAP__Status__c: payload.ONTAP__STATUS__C
+})]]></dw:set-payload>
+                    </dw:transform-message>
+                    <sfdc:create config-ref="Salesforce__Basic_Authentication" type="ONTAP__Negotiation__c" doc:name="Salesforce">
+                        <sfdc:objects ref="#[payload]"/>
+                    </sfdc:create>
+                    <logger message="SALESFORCE RESPONSE  ================   #[message.payloadAs(String)]" level="INFO" doc:name="Logger"/>
+                    <dw:transform-message doc:name="Transform Message">
+                        <dw:set-payload><![CDATA[%dw 1.0
+%output application/java
+---
+payload map ((payload , indexOfPayload01) -> {
+	SALESFORCE_ID: payload.id,
+	RECORD_ID: flowVars.savepayload.RECORD_ID[indexOfPayload01],
+	PROCESS_ID: flowVars.processid,
+	SALESFORCE_MSG_ERROR: payload.errors[0].message
+})]]></dw:set-payload>
+                    </dw:transform-message>
+                    <db:insert config-ref="Oracle_Configuration_arg" bulkMode="true" doc:name="Database">
+                        <db:parameterized-query><![CDATA[Insert into SFI_NEGOTIATION_INSERT_LOG (PROCESS_ID, RECORD_ID, SALESFORCE_ID, SALESFORCE_MSG_ERROR)
+values(#[payload.PROCESS_ID], #[payload.RECORD_ID], #[payload.SALESFORCE_ID], #[payload.SALESFORCE_MSG_ERROR])]]></db:parameterized-query>
+                    </db:insert>
+                    <logger message="RESPONSE ORACLE LOG ==============  #[message.payloadAs(String)]" level="INFO" doc:name="Logger"/>
+                </batch:commit>
+            </batch:step>
+        </batch:process-records>
+        <batch:on-complete>
+            <db:stored-procedure config-ref="Oracle_Configuration_arg" doc:name="Database">
+                <db:parameterized-query><![CDATA[call SFI_NEGOTIATION_INSERT_SP (:PROCESS_ID)]]></db:parameterized-query>
+                <db:in-param name="PROCESS_ID" type="NUMERIC" value="#[flowVars.processid]"/>
+
+            </db:stored-procedure>
+            <logger level="INFO" doc:name="Logger" message="END NEGOTIATION HEADER INSERT ======  #[message.payloadAs(java.lang.String)]"/>
+        </batch:on-complete>
+    </batch:job>
+</mule>
